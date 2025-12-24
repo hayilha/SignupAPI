@@ -1,25 +1,17 @@
 from flask import Flask, request, jsonify
+from db import get_db_connection
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import random
 import smtplib
 from email.mime.text import MIMEText
 import os
-import mysql.connector
 from dotenv import load_dotenv
 
 # Load .env variables
 load_dotenv()
 
 app = Flask(__name__)
-
-def get_db_connection():
-    return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
-        user=os.getenv("DB_USER"),
-        password=os.getenv("DB_PASSWORD"),
-        database=os.getenv("DB_NAME")
-    )
 
 # ----------------- EMAIL -----------------
 def send_email(to_email, subject, body):
@@ -49,37 +41,57 @@ def signup():
     email = data.get("email")
     password = data.get("password")
 
+    # 1️⃣ Validate input
     if not email or not password:
         return jsonify({"message": "Email and password required"}), 400
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT id FROM users WHERE email=%s", (email,))
-    if cursor.fetchone():
+    # 2️⃣ CHECK IF USER ALREADY EXISTS
+    cursor.execute(
+        "SELECT id FROM users WHERE email = %s",
+        (email,)
+    )
+    existing_user = cursor.fetchone()
+
+    if existing_user:
         cursor.close()
         conn.close()
-        return jsonify({"message": "User already exists"}), 400
+        return jsonify({
+            "message": "Account already exists. Please log in instead."
+        }), 409
 
+    # 3️⃣ Generate verification token
     token = str(random.randint(100000, 999999))
     expiration = datetime.now() + timedelta(minutes=10)
 
+    # 4️⃣ Insert new user
     cursor.execute("""
         INSERT INTO users (email, password, verification_token, verification_expiration)
         VALUES (%s, %s, %s, %s)
-    """, (email, generate_password_hash(password), token, expiration))
+    """, (
+        email,
+        generate_password_hash(password),
+        token,
+        expiration
+    ))
 
     conn.commit()
     cursor.close()
     conn.close()
 
+    # 5️⃣ Send verification email
     send_email(
         email,
         "Verify Account",
         f"Your verification token is {token}. It expires in 10 minutes."
     )
 
-    return jsonify({"message": "Signup successful"}), 201
+    return jsonify({
+        "message": "Signup successful. Please check your email to verify your account."
+    }), 201
+
 
 # ----------------- VERIFY -----------------
 @app.route("/verify", methods=["POST"])
@@ -137,12 +149,9 @@ def login():
     cursor.close()
     conn.close()
 
-    if not user:
-        return jsonify({"message": "User not found"}), 404
-    if not user["verified"]:
-        return jsonify({"message": "Account not verified"}), 403
-    if not check_password_hash(user["password"], password):
-        return jsonify({"message": "Wrong password"}), 400
+    # Everything must be inside the function!
+    if not user or not user["verified"] or not check_password_hash(user["password"], password):
+        return jsonify({"message": "Invalid email or password"}), 401
 
     return jsonify({"message": "Login successful"})
 
